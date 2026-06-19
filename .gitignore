@@ -1,0 +1,22 @@
+# Data — stays in Drive, never in repo
+data/raw/
+data/processed/
+*.zip
+
+# Model weights
+runs/
+*.pt
+*.onnx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
