@@ -1,10 +1,10 @@
 # VisDrone YOLOv8: Resolution, Tiling, and Quantization for Drone-View Object Detection
 
-Systematic study of three techniques for improving small object detection in drone-view imagery using YOLOv8s on VisDrone2019-DET.
+Systematic study of techniques for improving small object detection in drone-view imagery using YOLOv8s on VisDrone2019-DET.
 
 ## The Problem
 
-Standard YOLO inference resizes the full image to 640x640 before detection. For drone footage, this aggressive downscaling causes small objects (pedestrians, cyclists, tricycles) to become too small to detect reliably. This project explores three approaches to fix that, with a non-obvious finding at the end.
+Standard YOLO inference resizes the full image to 640x640 before detection. For drone footage, this aggressive downscaling causes small objects (pedestrians, cyclists, tricycles) to become too small to detect reliably. This project explores three approaches to fix that.
 
 ## Experiments
 
@@ -53,26 +53,29 @@ Training at 1280px is the strongest result: +42% mAP over baseline, +168% on bic
 
 ---
 
-### Experiment 4: Tiling the 1280px Model
+### Experiment 4: Tiling the 1280px Model: Patch Size Matters
 
-Natural question: does tiling on top of 1280px training push accuracy even further?
+Does tiling on top of 1280px training push accuracy further? The key variable is patch size.
 
-| Method | mAP@50 | bicycle | awning-tri | Latency (GPU) |
-|--------|--------|---------|------------|---------------|
-| Trained 1280px | 0.541 | 0.327 | 0.237 | 16.3ms |
-| Trained 1280px + tiled (0.3) | 0.507 | 0.318 | 0.205 | 1631ms |
+| Method | mAP@50 | bicycle | awning-tri | Latency |
+|--------|--------|---------|------------|---------|
+| 1280px baseline | 0.516 | 0.316 | 0.215 | 16ms |
+| 1280px + tiled 640px patches | 0.507 | 0.318 | 0.205 | 1631ms |
+| 1280px + tiled 1280px patches | 0.513 | 0.327 | 0.206 | 457ms |
 
-Tiling hurts the 1280px model. mAP drops from 0.541 to 0.507 and latency becomes 100x worse.
+Tiling with 640px patches on the 1280px model hurts accuracy and explodes latency. Tiling with 1280px patches recovers nearly all the accuracy and reduces latency from 1631ms to 457ms.
 
-This is the key finding of the project. The 1280px model was trained on full images with global context: it learned to use spatial relationships between objects across the full scene. Tiling destroys that context by slicing the image into isolated patches. A car that helped localize a nearby pedestrian is now in a different tile. For the 640px model, tiling was a net gain because it was resolution-starved. For the 1280px model, resolution is no longer the bottleneck; tiling only removes context it needs.
+The reason: the model was trained on 1280px images. Feeding it 640px patches at inference is out-of-distribution; the model has never seen that input scale during training. Matching patch size to training resolution is the correct approach.
 
-**Tiling is not universally better. It fixes a resolution problem, not a detection problem.**
+**Principle: patch size should match training resolution.** Mismatched patch size is worse than no tiling at all.
+
+Even with matched patch size, tiling the 1280px model provides marginal benefit over no tiling (0.513 vs 0.516 mAP overall, +0.011 on bicycle). For this dataset and model, 1280px training already captures most of what tiling can offer.
 
 ---
 
 ### Experiment 5: ONNX Quantization for Deployment
 
-Taking the best model (1280px), compressing it for edge deployment via ONNX INT8 static quantization. The detect head is excluded from quantization; quantizing it collapses output to zero due to sensitivity of the DFL distribution head.
+Compressing the model for edge deployment via ONNX INT8 static quantization. The detect head is excluded from quantization; quantizing it causes the DFL distribution head to collapse output to zero.
 
 | Method | mAP@50 | Size | vs FP32 |
 |--------|--------|------|---------|
@@ -80,7 +83,7 @@ Taking the best model (1280px), compressing it for edge deployment via ONNX INT8
 | ONNX FP32 (tiled 0.3) | 0.385 | 44.8MB | -9% mAP |
 | ONNX INT8 (tiled 0.3) | 0.346 | 17.9MB | -18% mAP |
 
-INT8 quantization achieves 60% model size reduction (44.8MB to 17.9MB) at 18% accuracy cost relative to ONNX FP32. Latency on x86 CPU is not a meaningful benchmark for QDQ-format INT8; this format targets GPU and ARM edge hardware where integer arithmetic is natively faster, typically achieving 2-4x speedup over FP32 on such devices.
+INT8 quantization achieves 60% model size reduction (44.8MB to 17.9MB) at 18% accuracy cost relative to ONNX FP32. Latency on x86 CPU is not a meaningful benchmark for QDQ-format INT8; this format targets GPU and ARM edge hardware where integer arithmetic is natively faster, typically achieving 2-4x speedup over FP32.
 
 ---
 
@@ -89,29 +92,29 @@ INT8 quantization achieves 60% model size reduction (44.8MB to 17.9MB) at 18% ac
 | Method | mAP@50 | bicycle | Latency | Note |
 |--------|--------|---------|---------|------|
 | Baseline 640px | 0.381 | 0.122 | 13.7ms | starting point |
-| Tiled 640px (0.3) | 0.424 | 0.194 | 68ms | +20% mAP, 5x latency |
+| Tiled 640px (0.3) | 0.424 | 0.194 | 68ms | +20% mAP, 5x latency cost |
 | Trained 1280px | 0.541 | 0.327 | 16.3ms | best accuracy and speed |
-| Tiled 1280px (0.3) | 0.507 | 0.318 | 1631ms | tiling hurts high-res model |
+| 1280px + tiled 1280px patches | 0.513 | 0.327 | 457ms | marginal gain on small classes |
 | ONNX INT8 (640px tiled) | 0.346 | 0.116 | CPU only | 60% size reduction |
 
-The practical recommendation for drone deployment: train at 1280px, deploy the PyTorch or ONNX FP32 model directly without tiling. Reserve tiling for cases where retraining is not possible.
+The practical recommendation for drone deployment: train at 1280px, deploy without tiling. If tiling is applied, patch size must match training resolution.
 
 ---
 
 ## Full Per-Class AP@50
 
-| Class | 640px | Tiled 640px | 1280px | Tiled 1280px |
-|-------|-------|-------------|--------|--------------|
-| pedestrian | 0.406 | 0.558 | 0.633 | 0.670 |
-| people | 0.288 | 0.384 | 0.489 | 0.520 |
-| bicycle | 0.117 | 0.194 | 0.327 | 0.318 |
-| car | 0.767 | 0.822 | 0.863 | 0.848 |
-| van | 0.337 | 0.411 | 0.473 | 0.477 |
-| truck | 0.341 | 0.361 | 0.493 | 0.375 |
-| tricycle | 0.253 | 0.299 | 0.415 | 0.387 |
-| awning-tricycle | 0.111 | 0.137 | 0.237 | 0.205 |
-| bus | 0.498 | 0.557 | 0.643 | 0.632 |
-| motor | 0.411 | 0.515 | 0.623 | 0.634 |
+| Class | 640px | Tiled 640px | 1280px | 1280px + tiled 1280px |
+|-------|-------|-------------|--------|-----------------------|
+| pedestrian | 0.406 | 0.558 | 0.633 | 0.646 |
+| people | 0.288 | 0.384 | 0.489 | 0.492 |
+| bicycle | 0.117 | 0.194 | 0.327 | 0.327 |
+| car | 0.767 | 0.822 | 0.863 | 0.859 |
+| van | 0.337 | 0.411 | 0.473 | 0.469 |
+| truck | 0.341 | 0.361 | 0.493 | 0.472 |
+| tricycle | 0.253 | 0.299 | 0.415 | 0.408 |
+| awning-tricycle | 0.111 | 0.137 | 0.237 | 0.206 |
+| bus | 0.498 | 0.557 | 0.643 | 0.624 |
+| motor | 0.411 | 0.515 | 0.623 | 0.624 |
 
 ---
 
@@ -148,8 +151,9 @@ python train.py --model yolov8s.pt --epochs 50 --imgsz 1280 --batch 8 --name vis
 # 4. Baseline eval
 python eval.py --weights best.pt
 
-# 5. Tiled inference eval
-python eval_tiled.py --weights best.pt --overlaps 0.2 0.3
+# 5. Tiled inference eval (match patch size to training resolution)
+python eval_tiled.py --weights best_640.pt --overlaps 0.2 0.3 --patch-size 640
+python eval_tiled.py --weights best_1280.pt --overlaps 0.2 0.3 --patch-size 1280
 
 # 6. Export and quantize
 python export.py --weights best.pt --data-root data/processed
@@ -182,7 +186,7 @@ visdrone-yolo/
 ```
 Input image (e.g. 1920x1080)
         |
-Slice into overlapping 640x640 patches
+Slice into overlapping patches (match patch size to training resolution)
         |
 Run YOLOv8 inference on each patch independently
         |
@@ -194,8 +198,8 @@ Final detections on full-resolution image
 ```
 
 Key parameters:
-- `patch_size`: tile size in pixels (default 640)
-- `overlap`: fractional overlap between tiles (0.3 recommended for 640px models)
+- `patch_size`: must match training resolution (640 for 640px model, 1280 for 1280px model)
+- `overlap`: fractional overlap between tiles (0.3 recommended)
 
 ## Model
 
