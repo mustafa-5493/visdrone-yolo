@@ -37,6 +37,7 @@ def run_tiled_inference(
     overlap: float = 0.2,
     conf: float = 0.25,
     iou: float = 0.45,
+    device: str = "cpu",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Run tiled inference on a single image.
@@ -54,7 +55,7 @@ def run_tiled_inference(
     for (x1, y1, x2, y2) in tiles:
         patch = img[y1:y2, x1:x2]
 
-        results = model(patch, conf=conf, iou=iou, verbose=False)[0]
+        results = model(patch, conf=conf, iou=iou, verbose=False, device=device)[0]
 
         if results.boxes is None or len(results.boxes) == 0:
             continue

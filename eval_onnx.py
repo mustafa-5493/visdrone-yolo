@@ -135,6 +135,9 @@ def parse_args():
     p.add_argument("--overlap",   type=float, default=0.3)
     p.add_argument("--conf",      type=float, default=0.001)
     p.add_argument("--iou",       type=float, default=0.45)
+    p.add_argument("--device",    default=None,
+                   help="Device for PyTorch inference: 0 (GPU) or cpu. "
+                        "Default: cpu when --device not set, for fair comparison with ONNX CPU.")
     return p.parse_args()
 
 
@@ -145,8 +148,12 @@ def main():
     val_img_dir = data_root / "images" / "val"
     val_lbl_dir = data_root / "labels" / "val"
 
+    # Default to CPU for fair apples-to-apples comparison with ONNX CPU runtime
+    device = args.device if args.device is not None else "cpu"
+
     print(f"Overlap : {args.overlap}")
     print(f"Conf    : {args.conf}  IoU: {args.iou}")
+    print(f"Device  : {device} (PyTorch) / CPU (ONNX Runtime)")
     print()
 
     results = {}
@@ -162,6 +169,7 @@ def main():
             pt_model, img,
             patch_size=640, overlap=args.overlap,
             conf=args.conf, iou=args.iou,
+            device=device,
         )
 
     results["PyTorch (tiled 0.3)"] = evaluate_predictions(
