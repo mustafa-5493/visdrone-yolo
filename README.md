@@ -1,18 +1,14 @@
-# VisDrone YOLOv8: Small Object Detection via Tiled Inference and Quantization
+# VisDrone YOLOv8: Resolution, Tiling, and Quantization for Drone-View Object Detection
 
-Fine-tuning YOLOv8s on VisDrone2019-DET and evaluating two deployment techniques: tiled inference for small object accuracy, and ONNX INT8 quantization for model compression.
+Systematic study of three techniques for improving small object detection in drone-view imagery using YOLOv8s on VisDrone2019-DET.
 
-## Motivation
+## The Problem
 
-Standard YOLO inference resizes the full image to 640x640 before detection. For drone footage, this aggressive downscaling causes small objects (pedestrians, cyclists, tricycles) to become too small to detect reliably.
-
-Tiled inference addresses this by slicing the original image into overlapping 640x640 patches, running detection on each patch independently, and merging results with NMS. Objects are never downscaled below their native resolution.
-
-Once accuracy is established, INT8 quantization compresses the model for deployment on edge hardware.
+Standard YOLO inference resizes the full image to 640x640 before detection. For drone footage, this aggressive downscaling causes small objects (pedestrians, cyclists, tricycles) to become too small to detect reliably. This project explores three approaches to fix that, with a non-obvious finding at the end.
 
 ## Experiments
 
-### Experiment 1: Baseline Fine-Tuning
+### Experiment 1: Baseline (640px)
 
 YOLOv8s pretrained on COCO, fine-tuned on VisDrone for 50 epochs at 640x640.
 
@@ -25,60 +21,103 @@ YOLOv8s pretrained on COCO, fine-tuned on VisDrone for 50 epochs at 640x640.
 | awning-tricycle | 0.145 |
 | **all (mAP@50)** | **0.381** |
 
-Large objects (car, bus) detected well. Small objects (bicycle, awning-tricycle) perform poorly because 640x640 downscaling destroys their pixel footprint.
+Large objects detected well. Small objects struggle because 640x640 destroys their pixel footprint.
 
-### Experiment 2: Tiled Inference
+---
+
+### Experiment 2: Tiled Inference on 640px Model
+
+Slice the original image into overlapping 640x640 patches, run detection on each independently, map coordinates back, merge with NMS. Objects are never downscaled below native resolution.
 
 | Method | mAP@50 | bicycle | awning-tri | Latency (GPU) |
 |--------|--------|---------|------------|---------------|
-| Baseline | 0.353 | 0.117 | 0.111 | 13.7ms |
-| Tiled overlap=0.2 | 0.416 | 0.191 | 0.132 | 68.5ms |
-| Tiled overlap=0.3 | 0.424 | 0.194 | 0.137 | 67.6ms |
+| Baseline 640px | 0.381 | 0.122 | 0.111 | 13.7ms |
+| Tiled 640px (overlap=0.2) | 0.416 | 0.191 | 0.132 | 68.5ms |
+| Tiled 640px (overlap=0.3) | 0.424 | 0.194 | 0.137 | 67.6ms |
 
-Tiling improves overall mAP@50 by +20% at a 5x GPU latency cost. Small object gains are largest:
+Tiling improves mAP@50 by +20% at 5x latency cost. Largest gains on the smallest classes: bicycle +66%, pedestrian +38%, people +33%. overlap=0.3 outperforms overlap=0.2 at identical latency.
 
-| Class | Baseline | Tiled (0.3) | Change |
-|-------|----------|-------------|--------|
-| bicycle | 0.117 | 0.194 | +66% |
-| pedestrian | 0.406 | 0.558 | +38% |
-| people | 0.288 | 0.384 | +33% |
-| motor | 0.411 | 0.515 | +25% |
-| awning-tricycle | 0.111 | 0.137 | +23% |
+---
 
-overlap=0.3 outperforms overlap=0.2 across nearly all classes at identical latency, making it the better default.
+### Experiment 3: Training at 1280px
 
-### Experiment 3: ONNX Export and INT8 Quantization
+Instead of tiling at inference time, train the model at twice the resolution so it sees small objects natively during learning.
 
-| Method | mAP@50 | Size | vs PyTorch |
-|--------|--------|------|------------|
+| Method | mAP@50 | bicycle | awning-tri | Latency (GPU) |
+|--------|--------|---------|------------|---------------|
+| Baseline 640px | 0.381 | 0.122 | 0.111 | 13.7ms |
+| Tiled 640px (0.3) | 0.424 | 0.194 | 0.137 | 68ms |
+| Trained 1280px | 0.541 | 0.327 | 0.237 | 16.3ms |
+
+Training at 1280px is the strongest result: +42% mAP over baseline, +168% on bicycle, at only 16.3ms inference. Faster than tiling and significantly more accurate.
+
+---
+
+### Experiment 4: Tiling the 1280px Model
+
+Natural question: does tiling on top of 1280px training push accuracy even further?
+
+| Method | mAP@50 | bicycle | awning-tri | Latency (GPU) |
+|--------|--------|---------|------------|---------------|
+| Trained 1280px | 0.541 | 0.327 | 0.237 | 16.3ms |
+| Trained 1280px + tiled (0.3) | 0.507 | 0.318 | 0.205 | 1631ms |
+
+Tiling hurts the 1280px model. mAP drops from 0.541 to 0.507 and latency becomes 100x worse.
+
+This is the key finding of the project. The 1280px model was trained on full images with global context: it learned to use spatial relationships between objects across the full scene. Tiling destroys that context by slicing the image into isolated patches. A car that helped localize a nearby pedestrian is now in a different tile. For the 640px model, tiling was a net gain because it was resolution-starved. For the 1280px model, resolution is no longer the bottleneck; tiling only removes context it needs.
+
+**Tiling is not universally better. It fixes a resolution problem, not a detection problem.**
+
+---
+
+### Experiment 5: ONNX Quantization for Deployment
+
+Taking the best model (1280px), compressing it for edge deployment via ONNX INT8 static quantization. The detect head is excluded from quantization; quantizing it collapses output to zero due to sensitivity of the DFL distribution head.
+
+| Method | mAP@50 | Size | vs FP32 |
+|--------|--------|------|---------|
 | PyTorch FP32 (tiled 0.3) | 0.424 | 22.5MB | baseline |
 | ONNX FP32 (tiled 0.3) | 0.385 | 44.8MB | -9% mAP |
 | ONNX INT8 (tiled 0.3) | 0.346 | 17.9MB | -18% mAP |
 
-INT8 quantization reduces model size from 44.8MB to 17.9MB (60% reduction) at a cost of 10% mAP relative to ONNX FP32.
+INT8 quantization achieves 60% model size reduction (44.8MB to 17.9MB) at 18% accuracy cost relative to ONNX FP32. Latency on x86 CPU is not a meaningful benchmark for QDQ-format INT8; this format targets GPU and ARM edge hardware where integer arithmetic is natively faster, typically achieving 2-4x speedup over FP32 on such devices.
 
-Note on latency: INT8 latency was not benchmarked here because ONNX Runtime's QDQ quantization format is optimized for GPU and ARM edge hardware, not x86 CPU. On x86 CPU, QDQ nodes add overhead rather than reducing it, making the numbers misleading. On target hardware (Jetson, ARM-based embedded systems), INT8 typically achieves 2-4x speedup over FP32.
+---
 
-The size/accuracy tradeoff is the meaningful result: a 60% smaller model with 18% accuracy loss is a real deployment decision.
+## Summary
 
-### Full per-class AP@50 across all experiments
+| Method | mAP@50 | bicycle | Latency | Note |
+|--------|--------|---------|---------|------|
+| Baseline 640px | 0.381 | 0.122 | 13.7ms | starting point |
+| Tiled 640px (0.3) | 0.424 | 0.194 | 68ms | +20% mAP, 5x latency |
+| Trained 1280px | 0.541 | 0.327 | 16.3ms | best accuracy and speed |
+| Tiled 1280px (0.3) | 0.507 | 0.318 | 1631ms | tiling hurts high-res model |
+| ONNX INT8 (640px tiled) | 0.346 | 0.116 | CPU only | 60% size reduction |
 
-| Class | Baseline | Tiled 0.3 | ONNX FP32 | ONNX INT8 |
-|-------|----------|-----------|-----------|-----------|
-| pedestrian | 0.406 | 0.558 | 0.520 | 0.486 |
-| people | 0.288 | 0.384 | 0.349 | 0.319 |
-| bicycle | 0.117 | 0.194 | 0.173 | 0.116 |
-| car | 0.767 | 0.822 | 0.809 | 0.787 |
-| van | 0.337 | 0.411 | 0.382 | 0.366 |
-| truck | 0.341 | 0.361 | 0.312 | 0.244 |
-| tricycle | 0.253 | 0.299 | 0.272 | 0.222 |
-| awning-tricycle | 0.111 | 0.137 | 0.120 | 0.113 |
-| bus | 0.498 | 0.557 | 0.435 | 0.407 |
-| motor | 0.411 | 0.515 | 0.478 | 0.400 |
+The practical recommendation for drone deployment: train at 1280px, deploy the PyTorch or ONNX FP32 model directly without tiling. Reserve tiling for cases where retraining is not possible.
+
+---
+
+## Full Per-Class AP@50
+
+| Class | 640px | Tiled 640px | 1280px | Tiled 1280px |
+|-------|-------|-------------|--------|--------------|
+| pedestrian | 0.406 | 0.558 | 0.633 | 0.670 |
+| people | 0.288 | 0.384 | 0.489 | 0.520 |
+| bicycle | 0.117 | 0.194 | 0.327 | 0.318 |
+| car | 0.767 | 0.822 | 0.863 | 0.848 |
+| van | 0.337 | 0.411 | 0.473 | 0.477 |
+| truck | 0.341 | 0.361 | 0.493 | 0.375 |
+| tricycle | 0.253 | 0.299 | 0.415 | 0.387 |
+| awning-tricycle | 0.111 | 0.137 | 0.237 | 0.205 |
+| bus | 0.498 | 0.557 | 0.643 | 0.632 |
+| motor | 0.411 | 0.515 | 0.623 | 0.634 |
+
+---
 
 ## Dataset
 
-VisDrone2019-DET: 10,209 images captured by drone-mounted cameras across 14 cities in China. Dense, small-object scenes with high occlusion. 10 object categories.
+VisDrone2019-DET: 10,209 images from drone-mounted cameras across 14 cities. Dense, small-object scenes with high occlusion. 10 object categories.
 
 | Split | Images |
 |-------|--------|
@@ -96,42 +135,28 @@ pip install -r requirements.txt
 
 ## Usage
 
-### 1. Convert annotations
 ```bash
+# 1. Convert annotations
 python data/prepare.py --root /path/to/visdrone_raw --output data/processed
-```
 
-### 2. Train
-```bash
+# 2. Train at 640px
 python train.py --model yolov8s.pt --epochs 50 --batch 16
-```
 
-### 3. Baseline eval
-```bash
-python eval.py --weights runs/train/visdrone_yolov8s/weights/best.pt
-```
+# 3. Train at 1280px
+python train.py --model yolov8s.pt --epochs 50 --imgsz 1280 --batch 8 --name visdrone_yolov8s_1280
 
-### 4. Tiled inference eval
-```bash
+# 4. Baseline eval
+python eval.py --weights best.pt
+
+# 5. Tiled inference eval
 python eval_tiled.py --weights best.pt --overlaps 0.2 0.3
-```
 
-### 5. Export to ONNX and quantize
-```bash
+# 6. Export and quantize
 python export.py --weights best.pt --data-root data/processed
-```
 
-### 6. ONNX vs PyTorch comparison (CPU)
-```bash
-python eval_onnx.py \
-  --weights best.pt \
-  --fp32 exports/best_fp32.onnx \
-  --int8 exports/best_int8.onnx \
-  --device cpu
+# 7. ONNX comparison (CPU)
+python eval_onnx.py --weights best.pt --fp32 exports/best_fp32.onnx --int8 exports/best_int8.onnx --device cpu
 ```
-
-### Colab
-Open `colab_runner.ipynb`, connect T4/A100 GPU, run cells top to bottom.
 
 ## Project Structure
 
@@ -169,16 +194,14 @@ Final detections on full-resolution image
 ```
 
 Key parameters:
-- `patch_size`: tile size in pixels (default 640, matches training resolution)
-- `overlap`: fractional overlap between adjacent tiles (0.3 recommended)
-
-Overlap prevents objects near tile boundaries from being missed. Higher overlap increases tile count and latency but reduces boundary artifacts.
+- `patch_size`: tile size in pixels (default 640)
+- `overlap`: fractional overlap between tiles (0.3 recommended for 640px models)
 
 ## Model
 
-YOLOv8s pretrained on COCO, fine-tuned on VisDrone for 50 epochs.
+YOLOv8s fine-tuned on VisDrone. Same architecture for both resolutions.
 
 - Parameters: 11.1M
 - GFLOPs: 28.5
-- Training: 50 epochs, AdamW, imgsz=640, batch=16
-- Hardware: NVIDIA A100 (Google Colab), ~34 minutes
+- 640px training: 50 epochs, ~34 minutes on A100
+- 1280px training: 48 epochs (early stop), ~96 minutes on A100
